@@ -77,5 +77,3 @@ dist/tomorrow_pdf_export.ankiaddon
 ## Documentation
 
 - Chinese technical overview: `说明文档.zh-CN.md`
-- Publishing guide: `PUBLISHING.md`
-- Release copy: `RELEASE_COPY.md`
