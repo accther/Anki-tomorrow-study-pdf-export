@@ -58,6 +58,30 @@ Recommended repository sections:
 - Compatibility note: tested with Anki 25.09.2 on macOS
 - Known limitations: scheduler fallback and complex template rendering sensitivity
 
+## 2.1 Publish a GitHub Release
+
+After pushing the repository and tag:
+
+```bash
+git tag -a v1.0.0 -m "v1.0.0"
+git push origin v1.0.0
+```
+
+Then on GitHub:
+
+1. Open the repository.
+2. Open `Releases`.
+3. Click `Draft a new release`.
+4. Choose the tag `v1.0.0`.
+5. Release title: `v1.0.0`.
+6. Copy the bilingual release notes from `RELEASE_COPY.md`.
+7. Upload `dist/tomorrow_pdf_export.ankiaddon` as a release asset.
+8. Publish the release.
+
+Recommended attached asset name:
+
+- `tomorrow_pdf_export.ankiaddon`
+
 ## 3. Publish to AnkiWeb
 
 Official upload entry:
