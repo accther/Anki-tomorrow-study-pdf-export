@@ -1,0 +1,7 @@
+.DS_Store
+__pycache__/
+*.pyc
+dist/
+
+# Local recovery artifacts should not ship in the public repo.
+recovery/
