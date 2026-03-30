@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from html import escape
+import re
 from typing import Callable
 
 from anki.latex import render_latex
@@ -11,11 +13,22 @@ from aqt.webview import AnkiWebView
 
 from .scheduler_snapshot import QueuedCardForPdf, TomorrowExportResult
 
+SCRIPT_TAG_RE = re.compile(r"<script\b[^>]*>.*?</script>", re.IGNORECASE | re.DOTALL)
+
+
+@dataclass(frozen=True)
+class RenderedCardForPdf:
+    card: QueuedCardForPdf
+    question_html: str
+    answer_html: str
+
 
 def render_result_to_pdf(
     result: TomorrowExportResult,
     output_path: str,
 ) -> None:
+    rendered_cards = _render_cards_to_static_html(result.cards)
+
     web = AnkiWebView(parent=mw)
     web.resize(1, 1)
     web.move(-10000, -10000)
@@ -65,22 +78,16 @@ def render_result_to_pdf(
     page.pdfPrintingFinished.connect(on_pdf_finished)
     web.set_bridge_command(on_bridge_command, web)
 
-    body = _build_export_body(result)
+    body = _build_export_body(result, rendered_cards)
     web.stdHtml(
         body,
         css=["css/reviewer.css"],
-        js=[
-            "js/webview.js",
-            "js/vendor/jquery.min.js",
-            "js/mathjax.js",
-            "js/vendor/mathjax/tex-chtml-full.js",
-        ],
         head=_build_export_head(result),
         context=mw,
         default_css=True,
     )
-    web.eval(_mathjax_ready_script())
-    timeout.start(20000)
+    web.eval(_print_ready_script())
+    timeout.start(10000)
     event_loop.exec()
 
     if state["error"]:
@@ -262,16 +269,19 @@ def _build_export_head(result: TomorrowExportResult) -> str:
 """
 
 
-def _build_export_body(result: TomorrowExportResult) -> str:
+def _build_export_body(
+    result: TomorrowExportResult,
+    cards: tuple[RenderedCardForPdf, ...],
+) -> str:
     title = "Tomorrow Study Export"
     study_date = result.target_study_day.strftime("%Y-%m-%d")
-    total_cards = len(result.cards)
+    total_cards = len(cards)
 
-    prompt_blocks = _grouped_pages(result.cards, _prompt_section, "questions")
-    answer_blocks = _grouped_pages(result.cards, _answer_section, "answers")
+    prompt_blocks = _grouped_pages(cards, _prompt_section, "questions")
+    answer_blocks = _grouped_pages(cards, _answer_section, "answers")
     empty_state = (
         "<section class='empty-state'><p>No cards were scheduled for the selected decks.</p></section>"
-        if not result.cards
+        if not cards
         else ""
     )
 
@@ -298,8 +308,8 @@ def _build_export_body(result: TomorrowExportResult) -> str:
 
 
 def _grouped_pages(
-    cards: tuple[QueuedCardForPdf, ...],
-    renderer: Callable[[QueuedCardForPdf], str],
+    cards: tuple[RenderedCardForPdf, ...],
+    renderer: Callable[[RenderedCardForPdf], str],
     section_name: str,
 ) -> str:
     if not cards:
@@ -313,16 +323,15 @@ def _grouped_pages(
     return "".join(pages)
 
 
-def _prompt_section(card: QueuedCardForPdf) -> str:
-    return _card_section(card, card.front_html, "Question")
+def _prompt_section(card: RenderedCardForPdf) -> str:
+    return _card_section(card.card, card.question_html, "Question")
 
 
-def _answer_section(card: QueuedCardForPdf) -> str:
-    return _card_section(card, card.back_html, "Answer")
+def _answer_section(card: RenderedCardForPdf) -> str:
+    return _card_section(card.card, card.answer_html, "Answer")
 
 
 def _card_section(card: QueuedCardForPdf, body_html: str, label: str) -> str:
-    prepared_html = _prepare_html_for_pdf(card, body_html)
     body_class = theme_manager.body_classes_for_card_ord(card.card_ord, False)
     kind_label = _kind_label(card.card_kind)
     response_strip = _response_strip() if label == "Question" else ""
@@ -337,7 +346,7 @@ def _card_section(card: QueuedCardForPdf, body_html: str, label: str) -> str:
   </div>
   <div class="print-card-body">
     <div class="{escape(body_class)}">
-      {prepared_html}
+      {body_html}
     </div>
     {response_strip}
     {workspace}
@@ -371,10 +380,155 @@ def _response_strip() -> str:
     return f"<div class=\"response-strip\">{options}</div>"
 
 
-def _mathjax_ready_script() -> str:
+def _render_cards_to_static_html(
+    cards: tuple[QueuedCardForPdf, ...],
+) -> tuple[RenderedCardForPdf, ...]:
+    if not cards:
+        return ()
+
+    web = AnkiWebView(parent=mw)
+    web.resize(1, 1)
+    web.move(-10000, -10000)
+    try:
+        rendered_cards: list[RenderedCardForPdf] = []
+        for card in cards:
+            rendered_cards.append(
+                RenderedCardForPdf(
+                    card=card,
+                    question_html=_render_static_card_html(web, card, card.front_html),
+                    answer_html=_render_static_card_html(web, card, card.back_html),
+                )
+            )
+        return tuple(rendered_cards)
+    finally:
+        web.deleteLater()
+
+
+def _render_static_card_html(
+    web: AnkiWebView,
+    card: QueuedCardForPdf,
+    html: str,
+) -> str:
+    page = web.page()
+    state: dict[str, str | None] = {"error": None, "html": None}
+    event_loop = QEventLoop()
+    timeout = QTimer()
+    timeout.setSingleShot(True)
+
+    body_class = theme_manager.body_classes_for_card_ord(card.card_ord, False)
+    prepared_html = _prepare_html_for_pdf(card, html)
+
+    def cleanup() -> None:
+        timeout.stop()
+
+    def finish_with_error(message: str) -> None:
+        state["error"] = message
+        cleanup()
+        event_loop.quit()
+
+    def finish_with_html(rendered_html: str | None) -> None:
+        state["html"] = _strip_script_tags(rendered_html or "")
+        cleanup()
+        event_loop.quit()
+
+    def on_bridge_command(cmd: str) -> None:
+        if cmd == "tomorrow-pdf-snapshot-ready":
+            page.runJavaScript(
+                """
+(() => {
+  const root = document.querySelector('.snapshot-root');
+  if (!root) {
+    return "";
+  }
+  root.querySelectorAll('script').forEach((node) => node.remove());
+  return root.innerHTML;
+})()
+""",
+                finish_with_html,
+            )
+            return
+        if cmd.startswith("tomorrow-pdf-error:"):
+            finish_with_error(cmd.split(":", 1)[1])
+
+    timeout.timeout.connect(
+        lambda: finish_with_error("Timed out while rendering a card snapshot for PDF export.")
+    )
+    web.set_bridge_command(on_bridge_command, web)
+    web.stdHtml(
+        _snapshot_body(body_class, prepared_html),
+        css=["css/reviewer.css"],
+        js=[
+            "js/webview.js",
+            "js/vendor/jquery.min.js",
+            "js/mathjax.js",
+            "js/vendor/mathjax/tex-chtml-full.js",
+        ],
+        head=_snapshot_head(),
+        context=mw,
+        default_css=True,
+    )
+    web.eval(_snapshot_ready_script())
+    timeout.start(20000)
+    event_loop.exec()
+
+    if state["error"]:
+        raise RuntimeError(state["error"])
+    return state["html"] or ""
+
+
+def _snapshot_head() -> str:
+    return """
+<style>
+  html,
+  body,
+  html.night-mode,
+  html.night-mode body,
+  body.nightMode,
+  body.night_mode {
+    background: #ffffff;
+    color: #1f2933;
+    margin: 0;
+    padding: 0;
+  }
+
+  .snapshot-root {
+    background: #ffffff;
+    color: #1f2933;
+  }
+  .snapshot-root .card {
+    background: #ffffff !important;
+    color: #1f2933 !important;
+  }
+  .snapshot-root img {
+    max-width: 100%;
+    vertical-align: middle;
+  }
+  .snapshot-root .MathJax,
+  .snapshot-root mjx-container {
+    font-size: 1em !important;
+  }
+</style>
+"""
+
+
+def _snapshot_body(body_class: str, html: str) -> str:
+    return f"""
+<section class="snapshot-root">
+  <div class="{escape(body_class)}">
+    {html}
+  </div>
+</section>
+"""
+
+
+def _strip_script_tags(html: str) -> str:
+    return SCRIPT_TAG_RE.sub("", html)
+
+
+def _snapshot_ready_script() -> str:
     return """
 (() => {
-  const finish = () => pycmd("tomorrow-pdf-ready");
+  const finish = () => pycmd("tomorrow-pdf-snapshot-ready");
   const fail = (err) => pycmd("tomorrow-pdf-error:" + String(err));
   const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
@@ -404,10 +558,41 @@ def _mathjax_ready_script() -> str:
       }
       await delay(500);
       MathJax.typesetClear();
-      await MathJax.typesetPromise(Array.from(document.querySelectorAll(".print-card-body")));
+      await MathJax.typesetPromise(Array.from(document.querySelectorAll(".snapshot-root")));
       await nextFrame();
       await nextFrame();
       await delay(250);
+      window.scrollTo(0, 0);
+      finish();
+    } catch (err) {
+      fail(err);
+    }
+  };
+
+  run();
+})();
+"""
+
+
+def _print_ready_script() -> str:
+    return """
+(() => {
+  const finish = () => pycmd("tomorrow-pdf-ready");
+  const fail = (err) => pycmd("tomorrow-pdf-error:" + String(err));
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+  const run = async () => {
+    try {
+      document.documentElement.classList.remove("night-mode");
+      document.documentElement.setAttribute("data-bs-theme", "light");
+      document.body.classList.remove("nightMode", "night_mode", "macos-dark-mode");
+      if (document.fonts && document.fonts.ready) {
+        await document.fonts.ready;
+      }
+      await nextFrame();
+      await nextFrame();
+      await delay(200);
       window.scrollTo(0, 0);
       finish();
     } catch (err) {
