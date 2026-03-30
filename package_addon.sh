@@ -14,7 +14,7 @@ cp "$ROOT_DIR/__init__.py" "$STAGE_DIR/"
 cp "$ROOT_DIR/scheduler_snapshot.py" "$STAGE_DIR/"
 cp "$ROOT_DIR/pdf_renderer.py" "$STAGE_DIR/"
 cp "$ROOT_DIR/README.md" "$STAGE_DIR/"
-cp "$ROOT_DIR/README.zh-CN.md" "$STAGE_DIR/"
+cp "$ROOT_DIR/说明文档.zh-CN.md" "$STAGE_DIR/"
 cp "$ROOT_DIR/manifest.json" "$STAGE_DIR/"
 
 find "$STAGE_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} +
